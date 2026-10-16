@@ -1,0 +1,3 @@
+SET NOCOUNT ON;
+SELECT 'MAGIC ' + CAST(MagicNum AS varchar) FROM MAGIC;
+GO

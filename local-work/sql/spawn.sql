@@ -1,0 +1,4 @@
+SET NOCOUNT ON;
+SELECT DISTINCT CAST(p.NpcID AS varchar) + ',' + COALESCE(CAST(n.sPid AS varchar),'NULL')
+FROM K_NPCPOS p LEFT JOIN K_NPC n ON n.sSid = p.NpcID;
+GO

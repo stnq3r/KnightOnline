@@ -1,0 +1,12 @@
+SET NOCOUNT ON;
+PRINT '=== tables named ITEM* ===';
+SELECT name FROM sys.tables WHERE name LIKE 'ITEM%' ORDER BY name;
+
+PRINT '=== key rows ===';
+SELECT Num, strName, Kind FROM ITEM WHERE Num IN (110110000,379016000,379205000,379221000,800076000,910030000) ORDER BY Num;
+
+PRINT '=== count Num in 3792xxxxx ===';
+SELECT COUNT(*) FROM ITEM WHERE Num >= 379000000 AND Num < 380000000;
+
+PRINT '=== total rows ===';
+SELECT COUNT(*) FROM ITEM;
