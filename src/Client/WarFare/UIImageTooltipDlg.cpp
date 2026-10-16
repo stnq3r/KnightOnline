@@ -65,6 +65,9 @@ CUIImageTooltipDlg::CUIImageTooltipDlg() :
 	m_pImg        = nullptr;
 	m_iTooltipNum = 0;
 
+	m_iCustomPrice          = -1;
+	m_iLastDrawnCustomPrice = -2;
+
 	ResetItem();
 }
 
@@ -80,6 +83,9 @@ void CUIImageTooltipDlg::Release()
 	m_iPosYBack   = 0;
 	m_pImg        = nullptr;
 	m_iTooltipNum = 0;
+
+	m_iCustomPrice          = -1;
+	m_iLastDrawnCustomPrice = -2;
 
 	ResetItem();
 }
@@ -234,20 +240,26 @@ int CUIImageTooltipDlg::CalcTooltipStringNumAndWrite(__IconItemSkill* spItem, bo
 
 	if (bPrice)
 	{
+		const int iPriceValue = m_iCustomPrice >= 0
+			? m_iCustomPrice
+			: (bBuy ? spItem->GetBuyPrice() : spItem->GetSellPrice());
+
 		if (bBuy)
 		{
-			m_pstdstr[iIndex] = fmt::format_text_resource(IDS_TOOLTIP_BUY_PRICE, CGameBase::FormatNumber(spItem->GetBuyPrice()));
+			m_pstdstr[iIndex] = fmt::format_text_resource(IDS_TOOLTIP_BUY_PRICE, CGameBase::FormatNumber(iPriceValue));
 
 			m_pStr[iIndex]->SetStyle(UI_STR_TYPE_HALIGN, UISTYLE_STRING_ALIGNLEFT);
 
-			if (SetTooltipTextColor(pInfoExt->iGold, spItem->pItemBasic->iPrice * spItem->pItemExt->siPriceMultiply))
+			if (m_iCustomPrice >= 0)
+				m_pStr[iIndex]->SetColor(m_CWhite);
+			else if (SetTooltipTextColor(pInfoExt->iGold, spItem->pItemBasic->iPrice * spItem->pItemExt->siPriceMultiply))
 				m_pStr[iIndex]->SetColor(m_CWhite);
 			else
 				m_pStr[iIndex]->SetColor(m_CRed);
 		}
 		else
 		{
-			m_pstdstr[iIndex] = fmt::format_text_resource(IDS_TOOLTIP_SELL_PRICE, CGameBase::FormatNumber(spItem->GetSellPrice()));
+			m_pstdstr[iIndex] = fmt::format_text_resource(IDS_TOOLTIP_SELL_PRICE, CGameBase::FormatNumber(iPriceValue));
 
 			m_pStr[iIndex]->SetStyle(UI_STR_TYPE_HALIGN, UISTYLE_STRING_ALIGNLEFT);
 			m_pStr[iIndex]->SetColor(m_CWhite);
@@ -1138,11 +1150,12 @@ void CUIImageTooltipDlg::DisplayTooltipsEnable(int xpos, int ypos, __IconItemSki
 	if (!IsVisible())
 		SetVisible(true);
 
-	if (IsItemChanged(spItem))
+	if (IsItemChanged(spItem) || m_iCustomPrice != m_iLastDrawnCustomPrice)
 	{
 		UpdateItem(spItem);
 
 		m_iTooltipNum = CalcTooltipStringNumAndWrite(spItem, bPrice, bBuy);
+		m_iLastDrawnCustomPrice = m_iCustomPrice;
 		SetPosSomething(xpos, ypos);
 	}
 	else if (m_iPosXBack != xpos || m_iPosYBack != ypos)

@@ -37,6 +37,11 @@ public:
 	int m_iCount;
 	int m_iDurability;
 
+	// When >= 0 the price line uses this value (e.g. a player-shop listing price)
+	// instead of the item's intrinsic buy/sell price.
+	int m_iCustomPrice;
+	int m_iLastDrawnCustomPrice;
+
 protected:
 	bool SetTooltipTextColor(int iMyValue, int iTooltipValue);
 	bool SetTooltipTextColor(e_Race eMyValue, e_Race eTooltipValue);
@@ -53,6 +58,10 @@ public:
 
 	void DisplayTooltipsEnable(int xpos, int ypos, __IconItemSkill* spItem, bool bPrice = false, bool bBuy = true);
 	void DisplayTooltipsDisable();
+
+	// Overrides the price line shown when bPrice=true. Pass -1 to restore the
+	// item's own buy/sell price. Set before calling DisplayTooltipsEnable.
+	void SetCustomPrice(int iPrice) { m_iCustomPrice = iPrice; }
 
 protected:
 	bool IsItemChanged(const __IconItemSkill* spItem) const;

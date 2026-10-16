@@ -8,13 +8,116 @@
 #include "N3FXMgr.h"
 
 #include "text_resources.h"
+#include "GameProcedure.h"
+#include "LocalInput.h"
+#include "UIImageTooltipDlg.h"
+#include "IconItemSkill.h"
+#include "N3UIWndBase.h"
+#include "UIManager.h"
+#include "PlayerMySelf.h"
+
+#include <limits>
 
 #include <N3Base/DFont.h>
 #include <N3Base/N3ShapeExtra.h>
 #include <N3Base/N3SndObj.h>
+#include <N3Base/N3UIImage.h>
+
+#include <algorithm>
+#include <limits>
 
 static const __Vector3 s_vLightOffset = { 10.0f, 40.0f, 30.0f };
 CN3SndObj* CPlayerBase::m_pSnd_MyMove = nullptr;
+
+// Retail personal-shop stall ("buyer" desk), shared by every merchant.
+static CN3Shape* s_pMerchantShopShape = nullptr;
+static bool s_bMerchantShopShapeLoadTried = false;
+
+static CN3Shape* MerchantShopShapeGet()
+{
+	if (s_pMerchantShopShape == nullptr && !s_bMerchantShopShapeLoadTried)
+	{
+		s_bMerchantShopShapeLoadTried = true;
+
+		CN3Shape* pShape = new CN3Shape();
+		if (pShape->LoadFromFile("Object\\buyer.n3shape"))
+		{
+			s_pMerchantShopShape = pShape;
+		}
+		else
+		{
+			delete pShape;
+			s_pMerchantShopShape = nullptr;
+		}
+	}
+
+	return s_pMerchantShopShape;
+}
+
+// Shared tooltip used to preview the items advertised on a merchant's overhead
+// board when the mouse hovers one of them.
+static CUIImageTooltipDlg* s_pMerchantPreviewTooltip = nullptr;
+static __IconItemSkill s_MerchantPreviewItem;
+
+static CUIImageTooltipDlg* MerchantPreviewTooltipGet()
+{
+	if (s_pMerchantPreviewTooltip != nullptr)
+		return s_pMerchantPreviewTooltip;
+
+	if (CGameBase::s_pPlayer == nullptr || CGameProcedure::s_pUIMgr == nullptr)
+		return nullptr;
+
+	__TABLE_UI_RESRC* pTblUI = CGameBase::s_pTbl_UI.Find(static_cast<int>(CGameBase::s_pPlayer->m_InfoBase.eNation));
+	if (pTblUI == nullptr || pTblUI->szItemInfo.empty())
+		return nullptr;
+
+	CUIImageTooltipDlg* pDlg = new CUIImageTooltipDlg();
+	pDlg->Init(CGameProcedure::s_pUIMgr);
+	if (!pDlg->LoadFromFile(pTblUI->szItemInfo))
+	{
+		delete pDlg;
+		return nullptr;
+	}
+
+	pDlg->InitPos();
+	pDlg->SetVisible(false);
+	s_pMerchantPreviewTooltip = pDlg;
+	return s_pMerchantPreviewTooltip;
+}
+
+static void MerchantPreviewShowTooltip(uint32_t itemID, uint32_t price, const POINT& ptMouse)
+{
+	if (itemID == 0 || itemID > static_cast<uint32_t>(std::numeric_limits<int>::max()))
+		return;
+
+	CUIImageTooltipDlg* pTip = MerchantPreviewTooltipGet();
+	if (pTip == nullptr)
+		return;
+
+	__TABLE_ITEM_BASIC* pItem = CGameBase::s_pTbl_Items_Basic.Find(static_cast<int>(itemID) / 1000 * 1000);
+	if (pItem == nullptr || pItem->byExtIndex < 0 || pItem->byExtIndex >= MAX_ITEM_EXTENSION)
+		return;
+
+	__TABLE_ITEM_EXT* pItemExt = CGameBase::s_pTbl_Items_Exts[pItem->byExtIndex].Find(static_cast<int>(itemID) % 1000);
+	if (pItemExt == nullptr)
+		return;
+
+	s_MerchantPreviewItem.pItemBasic = pItem;
+	s_MerchantPreviewItem.pItemExt   = pItemExt;
+	s_MerchantPreviewItem.iCount     = 1;
+	const int iMaxDur                = pItem->siMaxDurability + pItemExt->siMaxDurability;
+	s_MerchantPreviewItem.iDurability = iMaxDur > 0 ? iMaxDur : 1;
+
+	const bool bHasPrice = price > 0;
+	pTip->SetCustomPrice(bHasPrice ? static_cast<int>(price) : -1);
+	pTip->DisplayTooltipsEnable(ptMouse.x, ptMouse.y, &s_MerchantPreviewItem, bHasPrice, true);
+}
+
+void MerchantPreviewTooltipReset()
+{
+	if (s_pMerchantPreviewTooltip != nullptr)
+		s_pMerchantPreviewTooltip->SetVisible(false);
+}
 
 CPlayerBase::CPlayerBase()
 {
@@ -60,6 +163,15 @@ CPlayerBase::~CPlayerBase()
 	m_pInfoFont = nullptr;
 	delete m_pBalloonFont;
 	m_pBalloonFont = nullptr;
+	delete m_pMerchantFont;
+	m_pMerchantFont = nullptr;
+	delete m_pMerchantItemDisplay;
+	m_pMerchantItemDisplay = nullptr;
+	for (CN3UIImage*& image : m_pMerchantPreviewImages)
+	{
+		delete image;
+		image = nullptr;
+	}
 
 	m_bSoundAllSet = false;
 	CN3Base::s_SndMgr.ReleaseObj(&m_pSnd_Move);
@@ -131,6 +243,7 @@ void CPlayerBase::Release()
 	m_InfoBase.Init();                        // 첨엔 종족값을 모른다..
 
 	m_pShapeExtraRef  = nullptr;              // 이 NPC 가 성문이나 집등 오브젝트의 형태이면 이 포인터를 세팅해서 쓴,다..
+	MerchantStringSet("", false);
 
 	m_fCastFreezeTime = 0.0f;
 	m_fAttackDelta    = 1.0f;                 // 스킬이나 마법에 의해 변하는 공격 속도.. 1.0 이 기본이고 클수록 더 빨리 공격한다.
@@ -149,6 +262,9 @@ void CPlayerBase::Release()
 
 void CPlayerBase::SetSoundAndInitFont(uint32_t dwFontFlag)
 {
+	if (m_bMerchanting && m_pMerchantFont == nullptr && m_pLooksRef != nullptr)
+		MerchantStringSet(m_szMerchantMessage, true, m_adwMerchantPreviewItemIDs, m_adwMerchantPreviewPrices);
+
 	if (m_pLooksRef == nullptr)
 		return;
 
@@ -209,6 +325,9 @@ void CPlayerBase::SetSoundPlug(__TABLE_ITEM_BASIC* pItemBasic)
 
 void CPlayerBase::ReleaseSoundAndFont()
 {
+	delete m_pMerchantFont;
+	m_pMerchantFont = nullptr;
+
 	if (false == m_bSoundAllSet)
 		return;
 	m_bSoundAllSet = false;
@@ -257,6 +376,126 @@ void CPlayerBase::InfoStringSet(const std::string& szInfo, D3DCOLOR crFont)
 	}
 	m_pInfoFont->SetText(szInfo, D3DFONT_BOLD); // 폰트에 텍스트 지정.
 	m_pInfoFont->SetFontColor(crFont);
+}
+
+void CPlayerBase::MerchantStringSet(const std::string& szMessage, bool bMerchanting, const uint32_t* previewItemIDs,
+	const uint32_t* previewPrices)
+{
+	m_bMerchanting = bMerchanting;
+	if (!bMerchanting)
+	{
+		m_szMerchantMessage.clear();
+		delete m_pMerchantFont;
+		m_pMerchantFont = nullptr;
+		delete m_pMerchantItemDisplay;
+		m_pMerchantItemDisplay = nullptr;
+		for (int i = 0; i < 4; i++)
+		{
+			m_adwMerchantPreviewItemIDs[i] = 0;
+			m_adwMerchantPreviewPrices[i] = 0;
+			m_adwMerchantPreviewTextureItemIDs[i] = 0;
+			m_rcMerchantPreviewSlot[i] = {};
+			delete m_pMerchantPreviewImages[i];
+			m_pMerchantPreviewImages[i] = nullptr;
+		}
+		return;
+	}
+
+	m_szMerchantMessage = szMessage;
+	if (previewItemIDs != nullptr)
+		std::copy_n(previewItemIDs, 4, m_adwMerchantPreviewItemIDs);
+	if (previewPrices != nullptr)
+		std::copy_n(previewPrices, 4, m_adwMerchantPreviewPrices);
+
+	// Retail shop board: co_TradeItemDisplay, a background image sliced out of
+	// ui_marketing_us.dxt with four item slots. Loaded lazily, once per character.
+	if (m_pMerchantItemDisplay == nullptr)
+	{
+		__TABLE_UI_RESRC* pTblUI = CGameBase::s_pTbl_UI.Find(static_cast<int>(m_InfoBase.eNation));
+		if (pTblUI != nullptr && !pTblUI->szTradeItemDisplay.empty())
+		{
+			CN3UIBase* pPanel = new CN3UIBase();
+			pPanel->Init(nullptr);
+			if (pPanel->LoadFromFile(pTblUI->szTradeItemDisplay))
+			{
+				m_pMerchantItemDisplay = pPanel;
+				for (int i = 0; i < 4; i++)
+				{
+					CN3UIBase* pSlot = pPanel->GetChildByID(std::to_string(i));
+					if (pSlot != nullptr)
+						m_rcMerchantPreviewSlot[i] = pSlot->GetRegion();
+				}
+			}
+			else
+			{
+				delete pPanel;
+			}
+		}
+	}
+
+	if (m_pMerchantFont == nullptr)
+	{
+		std::string szFont = fmt::format_text_resource(IDS_FONT_INFO);
+		m_pMerchantFont = new CDFont(szFont, 12, D3DFONT_BOLD);
+		m_pMerchantFont->InitDeviceObjects(s_lpD3DDev);
+		m_pMerchantFont->RestoreDeviceObjects();
+	}
+
+	m_pMerchantFont->SetText("Merchant", D3DFONT_BOLD);
+	m_pMerchantFont->SetFontColor(D3DCOLOR_XRGB(255, 220, 96));
+
+	for (int i = 0; i < 4; i++)
+	{
+		const uint32_t itemID = m_adwMerchantPreviewItemIDs[i];
+		if (itemID == 0 || itemID > static_cast<uint32_t>(std::numeric_limits<int>::max()))
+		{
+			m_adwMerchantPreviewTextureItemIDs[i] = 0;
+			delete m_pMerchantPreviewImages[i];
+			m_pMerchantPreviewImages[i] = nullptr;
+			continue;
+		}
+
+		if (m_adwMerchantPreviewTextureItemIDs[i] != itemID)
+		{
+			delete m_pMerchantPreviewImages[i];
+			m_pMerchantPreviewImages[i] = nullptr;
+			m_adwMerchantPreviewTextureItemIDs[i] = itemID;
+		}
+		if (m_pMerchantPreviewImages[i] != nullptr
+			&& m_pMerchantPreviewImages[i]->GetTex() != nullptr)
+			continue;
+
+		__TABLE_ITEM_BASIC* pItem = s_pTbl_Items_Basic.Find(static_cast<int>(itemID) / 1000 * 1000);
+		if (pItem == nullptr || pItem->byExtIndex < 0 || pItem->byExtIndex >= MAX_ITEM_EXTENSION)
+			continue;
+
+		__TABLE_ITEM_EXT* pItemExt = s_pTbl_Items_Exts[pItem->byExtIndex].Find(static_cast<int>(itemID) % 1000);
+		if (pItemExt == nullptr)
+			continue;
+
+		e_PartPosition part = PART_POS_UNKNOWN;
+		e_PlugPosition plug = PLUG_POS_UNKNOWN;
+		std::string iconFN;
+		if (MakeResrcFileNameForUPC(pItem, pItemExt, nullptr, &iconFN, part, plug, m_InfoBase.eRace) == ITEM_TYPE_UNKNOWN
+			|| iconFN.empty())
+			continue;
+
+		if (m_pMerchantPreviewImages[i] == nullptr)
+		{
+			m_pMerchantPreviewImages[i] = new CN3UIImage();
+			m_pMerchantPreviewImages[i]->Init(nullptr);
+		}
+		m_pMerchantPreviewImages[i]->SetVisible(true);
+		m_pMerchantPreviewImages[i]->SetTex(iconFN);
+		// Same icon UV convention the inventory uses (a 45x45 icon inside a 64x64 texture).
+		m_pMerchantPreviewImages[i]->SetUVRect(0.0f, 0.0f, 45.0f / 64.0f, 45.0f / 64.0f);
+		if (m_pMerchantPreviewImages[i]->GetTex() == nullptr)
+		{
+			delete m_pMerchantPreviewImages[i];
+			m_pMerchantPreviewImages[i] = nullptr;
+			m_adwMerchantPreviewTextureItemIDs[i] = 0;
+		}
+	}
 }
 
 void CPlayerBase::BalloonStringSet(const std::string& szBalloon, D3DCOLOR crFont)
@@ -839,6 +1078,37 @@ void CPlayerBase::Render(float fSunAngle)
 	CN3Base::RenderLines(vLine, 2, 0xff00ffff);
 #endif
 
+	// Retail personal-shop stall: a "buyer" desk placed once when the shop
+	// opens and then left fixed in the world while the shop is open.
+	if (m_bMerchanting)
+	{
+		CN3Shape* pShop = MerchantShopShapeGet();
+		if (pShop != nullptr)
+		{
+			if (!m_bMerchantShopPlaced)
+			{
+				__Vector3 vDir = this->Direction();
+				vDir.y         = 0.0f;
+				vDir.Normalize();
+
+				const float fDistance = this->Radius() + 0.2f;
+				m_vMerchantShopPos    = m_Chr.Pos() + vDir * fDistance;
+				m_vMerchantShopPos.y  = m_Chr.Pos().y;
+				m_qMerchantShopRot    = m_Chr.Rot();
+				m_bMerchantShopPlaced = true;
+			}
+
+			pShop->PosSet(m_vMerchantShopPos);
+			pShop->RotSet(m_qMerchantShopRot);
+			pShop->Tick();
+			pShop->Render();
+		}
+	}
+	else
+	{
+		m_bMerchantShopPlaced = false;
+	}
+
 	if (m_InfoBase.bRenderID && m_pIDFont)
 	{
 		float fDist = (m_Chr.Pos() - s_CameraData.vEye).Magnitude();
@@ -899,6 +1169,63 @@ void CPlayerBase::Render(float fSunAngle)
 				m_pBalloonFont->DrawText(pt.x - (size.cx / 2.0f) - 1.0f, pt.y - 1.0f, 0xff000000, 0);
 				m_pBalloonFont->DrawText(pt.x - (size.cx / 2.0f) + 1.0f, pt.y + 1.0f, 0xff000000, 0);
 				m_pBalloonFont->DrawText(pt.x - (size.cx / 2.0f) + 0.0f, pt.y + 0.0f, crFont, D3DFONT_BOLD);
+			}
+		}
+	}
+
+	// The merchant message and item previews remain visible when the player
+	// has turned off ordinary character name labels.
+	if (m_bMerchanting && m_pMerchantFont != nullptr && m_pMerchantFont->IsSetText())
+	{
+		const float fDist = (m_Chr.Pos() - s_CameraData.vEye).Magnitude();
+		if (fDist < 48.0f)
+		{
+			__Vector3 vHead = this->HeadPosition();
+			vHead.y += this->Height() / 10.0f;
+			if (PSA_SITDOWN == m_eState)
+				vHead.y += this->RootPosition().y - this->Height() / 2.0f;
+			_POINT pt = ::_Convert3D_To_2DCoordinate(
+				vHead, s_CameraData.mtxView, s_CameraData.mtxProjection, s_CameraData.vp.Width, s_CameraData.vp.Height);
+			SIZE size = m_pMerchantFont->GetSize();
+			pt.y -= size.cy + 5;
+			const D3DCOLOR fontColor = m_pMerchantFont->GetFontColor();
+			m_pMerchantFont->DrawText(pt.x - (size.cx / 2.0f) - 1.0f, pt.y - 1.0f, 0xff000000, 0);
+			m_pMerchantFont->DrawText(pt.x - (size.cx / 2.0f) + 1.0f, pt.y + 1.0f, 0xff000000, 0);
+			m_pMerchantFont->DrawText(pt.x - (size.cx / 2.0f), pt.y, fontColor, D3DFONT_BOLD);
+
+			// Retail co_TradeItemDisplay board (ui_marketing_us.dxt) with the
+			// merchant's advertised items rendered into its four preview slots.
+			if (m_pMerchantItemDisplay != nullptr
+				&& m_rcMerchantPreviewSlot[0].right > m_rcMerchantPreviewSlot[0].left)
+			{
+				const int slotCenterX = (m_rcMerchantPreviewSlot[0].left + m_rcMerchantPreviewSlot[3].right) / 2;
+				const int originX     = pt.x - slotCenterX;
+				const int originY     = (pt.y - 4) - m_rcMerchantPreviewSlot[0].bottom;
+				m_pMerchantItemDisplay->SetPos(originX, originY);
+				m_pMerchantItemDisplay->Render();
+
+				const POINT ptMouse = CGameProcedure::s_pLocalInput != nullptr
+					? CGameProcedure::s_pLocalInput->MouseGetPos()
+					: POINT { -1, -1 };
+
+				for (int i = 0; i < 4; i++)
+				{
+					CN3UIImage* image = m_pMerchantPreviewImages[i];
+					if (image == nullptr || m_adwMerchantPreviewItemIDs[i] == 0)
+						continue;
+
+					const RECT& slot = m_rcMerchantPreviewSlot[i];
+					RECT iconRect { slot.left + originX, slot.top + originY,
+						slot.right + originX, slot.bottom + originY };
+					image->SetRegion(iconRect);
+					image->Render();
+
+					if (ptMouse.x >= iconRect.left && ptMouse.x < iconRect.right
+						&& ptMouse.y >= iconRect.top && ptMouse.y < iconRect.bottom)
+					{
+						MerchantPreviewShowTooltip(m_adwMerchantPreviewItemIDs[i], m_adwMerchantPreviewPrices[i], ptMouse);
+					}
+				}
 			}
 		}
 	}

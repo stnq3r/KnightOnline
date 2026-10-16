@@ -75,6 +75,8 @@ struct __InfoPlayerBase
 };
 
 class CN3ShapeExtra;
+class CN3UIImage;
+class CN3UIBase;
 class CPlayerBase : public CGameBase
 {
 	friend class CPlayerOtherMgr;
@@ -97,6 +99,18 @@ protected:
 	CDFont* m_pIDFont                                     = nullptr;                  // ID 찍는데 쓰는 Font.. -.-;
 	CDFont* m_pInfoFont                                   = nullptr;                  // 파티원 모집등.. 기타 정보 표시..
 	CDFont* m_pBalloonFont                                = nullptr;                  // 풍선말 표시...
+	CDFont* m_pMerchantFont                              = nullptr;                  // Persistent personal-merchant sign text.
+	std::string m_szMerchantMessage;
+	bool m_bMerchanting                                  = false;
+	uint32_t m_adwMerchantPreviewItemIDs[4]              = {};
+	uint32_t m_adwMerchantPreviewPrices[4]               = {};
+	uint32_t m_adwMerchantPreviewTextureItemIDs[4]       = {};
+	CN3UIImage* m_pMerchantPreviewImages[4]               = {};
+	CN3UIBase* m_pMerchantItemDisplay                    = nullptr;                  // Retail co_TradeItemDisplay shop board.
+	RECT m_rcMerchantPreviewSlot[4]                      = {};                       // File-space slot rects from that board.
+	__Vector3 m_vMerchantShopPos                         = {};                       // Fixed world position of the shop stall.
+	__Quaternion m_qMerchantShopRot                      = {};                       // Fixed world rotation of the shop stall.
+	bool m_bMerchantShopPlaced                           = false;                    // Stall transform captured while the shop is open.
 	float m_fTimeBalloon                                  = 0.0f;                     // 풍선말 표시 시간..
 
 	e_StateAction m_eState                                = PSA_BASIC;                // 행동 상태..
@@ -369,6 +383,8 @@ public:
 	void FlickerFactorSet(float fAlpha);
 
 	void InfoStringSet(const std::string& szInfo, D3DCOLOR crFont);
+	void MerchantStringSet(const std::string& szMessage, bool bMerchanting, const uint32_t* previewItemIDs = nullptr,
+		const uint32_t* previewPrices = nullptr);
 	void BalloonStringSet(const std::string& szBalloon, D3DCOLOR crFont);
 	void IDSet(int iID, const std::string& szID, D3DCOLOR crID);
 	virtual void KnightsInfoSet(int iID, const std::string& szName, int iGrade, int iRank);
@@ -443,5 +459,10 @@ public:
 		return -1;
 	}
 };
+
+// Hides the shared merchant-board preview tooltip. Called once per frame before
+// the world is rendered; the tooltip re-shows itself when the cursor hovers an
+// advertised item.
+void MerchantPreviewTooltipReset();
 
 #endif // !defined(AFX_PlayerBase_H__B8B8986B_3635_462D_8C38_A052CA75B331__INCLUDED_)

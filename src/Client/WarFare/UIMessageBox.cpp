@@ -10,6 +10,7 @@
 #include "UIKnightsOperation.h"
 #include "UICreateClanName.h"
 #include "UIPartyBBS.h"
+#include "UITradeBuyInventory.h"
 #include "GameEng.h"
 #include "GameProcLogIn.h"
 #include "LocalInput.h"
@@ -171,6 +172,14 @@ bool CUIMessageBox::ReceiveMessage(CN3UIBase* pSender, uint32_t dwMsg)
 					PostQuitMessage(0);                                                             // 종료...
 				}
 				break;
+				case BEHAVIOR_MERCHANT_MOVE:
+					if (pProcMain != nullptr)
+						pProcMain->ResolveMerchantMove(true);
+					break;
+				case BEHAVIOR_MERCHANT_PURCHASE:
+					if (pProcMain != nullptr && pProcMain->m_pUITradeBuyInventory != nullptr)
+						pProcMain->m_pUITradeBuyInventory->ResolvePurchaseConfirmation(true);
+					break;
 				default:
 					break;
 			}
@@ -200,6 +209,14 @@ bool CUIMessageBox::ReceiveMessage(CN3UIBase* pSender, uint32_t dwMsg)
 
 				case BEHAVIOR_CLAN_JOIN:
 					pProcMain->MsgSend_KnightsJoinReq(false);
+					break;
+				case BEHAVIOR_MERCHANT_MOVE:
+					if (pProcMain != nullptr)
+						pProcMain->ResolveMerchantMove(false);
+					break;
+				case BEHAVIOR_MERCHANT_PURCHASE:
+					if (pProcMain != nullptr && pProcMain->m_pUITradeBuyInventory != nullptr)
+						pProcMain->m_pUITradeBuyInventory->ResolvePurchaseConfirmation(false);
 					break;
 
 				default:

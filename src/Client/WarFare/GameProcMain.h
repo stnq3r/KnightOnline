@@ -4,6 +4,7 @@
 #pragma once
 
 #include "GameProcedure.h"
+#include <map>
 #include <set>
 
 typedef std::set<int>::iterator it_ID;
@@ -19,6 +20,19 @@ class CGameProcMain : public CGameProcedure
 protected:
 	std::set<int> m_SetNPCID;
 	std::set<int> m_SetUPCID;
+
+	struct MerchantOwnerState
+	{
+		std::string message;
+		uint32_t previewItemIDs[MAX_MERCH_ITEMS] = {};
+		uint32_t previewPrices[MAX_MERCH_ITEMS] = {};
+	};
+	std::map<int16_t, MerchantOwnerState> m_MerchantOwners;
+	int16_t m_iPendingMerchantListUID = -1;
+	e_MoveDirection m_ePendingMerchantMoveDirection = MD_STOP;
+	bool m_bPendingMerchantMoveStart = false;
+	bool m_bMerchantMoveConfirmPending = false;
+	bool m_bPendingMerchantTargetMove = false;
 
 public:
 #ifdef _N3_64GRID_
@@ -66,6 +80,10 @@ public:
 	class CUIUpgradeSelect* m_pUIUpgradeSelect;
 	class CUIItemUpgrade* m_pUIItemUpgrade;
 	class CUILevelGuide* m_pUILevelGuide;
+
+	// Personal merchant (player shop)
+	class CUITradeInventory* m_pUITradeInventory;
+	class CUITradeBuyInventory* m_pUITradeBuyInventory;
 
 	class CN3Shape* m_pTargetSymbol;              // 플레이어가 타겟으로 잡은 캐릭터의 위치위에 그리면 된다..
 
@@ -162,6 +180,12 @@ protected:
 	void MsgRecv_Notice(Packet& pkt);
 	void MsgRecv_PartyOrForce(Packet& pkt);
 	void MsgRecv_PerTrade(Packet& pkt);
+	void MsgRecv_Merchant(Packet& pkt);
+	bool RequestMerchantListForOwner(int16_t ownerSocketID);
+	bool TryOpenTargetMerchant();
+	void ForgetMerchantOwner(int16_t ownerSocketID);
+	void RefreshMerchantOwnerVisual(int16_t ownerSocketID);
+	void ClearMerchantOwnerState();
 
 	void MsgRecv_SkillChange(Packet& pkt);                  // 스킬 변화..
 	void MsgRecv_MagicProcess(Packet& pkt);                 // 스킬 변화..
@@ -254,6 +278,9 @@ public:
 	bool OpenCmdEdit(const std::string& msg);
 
 	void CommandMove(e_MoveDirection eMD, bool bStartOrEnd); // 움직이는 방향(전후진, 멈춤), 움직이기 시작하는가?
+	bool IsMerchantOwnerActive(int16_t ownerSocketID) const;
+	void RequestMerchantTargetMoveConfirmation();
+	void ResolveMerchantMove(bool bAccept);
 
 	/// \brief toggles the player's autoattack
 	void CommandEnableAttackContinous(bool bEnable, CPlayerBase* pTarget);
@@ -297,6 +324,16 @@ public:
 	void MsgSend_StateChange(e_SubPacket_State eSP, int iState);
 	void MsgSend_PerTradeReq(int iDestID, bool bNear = true);
 	void MsgSend_SpeedCheck(bool bInit = false);
+
+	// Personal merchant (player shop) messages
+	void MsgSend_MerchantOpen();
+	void MsgSend_MerchantClose();
+	void MsgSend_MerchantItemAdd(int iItemID, int iCount, int iPrice, int iSrcInvOrder, int iDstShopOrder, uint8_t bMode);
+	void MsgSend_MerchantItemCancel(int iShopOrder);
+	void MsgSend_MerchantItemList(int iMerchantUID);
+	void MsgSend_MerchantItemBuy(int iItemID, int iCount, int iShopSlot, int iDestInvOrder);
+	void MsgSend_MerchantInsert(const std::string& szMsg);
+	void MsgSend_MerchantTradeCancel();
 
 	void MsgSend_PartyOrForcePermit(bool bYesNo);             // iPartyOrForce 1 : Party, 2:Force
 	void MsgSend_PartyOrForceLeave();                         // iPartyOrForce 1 : Party, 2:Force

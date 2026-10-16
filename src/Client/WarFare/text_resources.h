@@ -562,6 +562,7 @@ enum e_TextResourceID : uint16_t
 	IDS_ITEM_RECEIVED							= 7613, // You've received the %s item. 
 	IDS_TRADE_COIN_RECV							= 7682, // Received %s coins.
 	IDS_TRADE_COIN_PAID							= 7683, // Paid %s coins. 
+	IDS_LOCATION								= 7700, // (Location:%d,%d)
 
 	IDS_CMD_WHISPER								= 8000, // PM
 	IDS_CMD_TOWN								= 8001, // Town

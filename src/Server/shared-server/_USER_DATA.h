@@ -15,6 +15,18 @@ struct _ITEM_DATA
 	int64_t nSerialNum; // item serial code
 };
 
+struct _MERCH_DATA
+{
+	uint32_t nNum         = 0;     // item id
+	int16_t sDuration     = 0;     // item durability
+	uint16_t sCount       = 0;     // remaining quantity for sale
+	int64_t nSerialNum    = 0;     // item serial code
+	uint32_t nPrice       = 0;     // price per unit
+	uint8_t bOriginalSlot = 0;     // inventory slot the item came from
+	_ITEM_DATA item       = {};    // full snapshot held by the shop while listed
+	bool IsSoldOut        = false;
+};
+
 struct _WAREHOUSE_ITEM_DATA
 {
 	int32_t nNum;       // item 번호

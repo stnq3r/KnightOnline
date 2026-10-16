@@ -10,6 +10,8 @@
 #include "GameProcMain.h"
 #include "UIInventory.h"
 #include "UITransactionDlg.h"
+#include "UITradeInventory.h"
+#include "UITradeBuyInventory.h"
 
 #include "SubProcPerTrade.h"
 #include "UIPerTradeDlg.h"
@@ -79,6 +81,13 @@ bool CCountableItemEditDlg::ReceiveMessage(CN3UIBase* pSender, uint32_t dwMsg)
 						case UIWND_DISTRICT_PER_TRADE_MY:
 							CGameProcedure::s_pProcMain->m_pSubProcPerTrade->ItemCountOK();
 							break;
+						case UIWND_DISTRICT_PER_TRADE_OTHER:
+							if (CGameProcedure::s_pProcMain->m_pUITradeInventory != nullptr
+								&& CGameProcedure::s_pProcMain->m_pUITradeInventory->IsVisible())
+								CGameProcedure::s_pProcMain->m_pUITradeInventory->ItemCountOK();
+							else if (CGameProcedure::s_pProcMain->m_pUITradeBuyInventory != nullptr)
+								CGameProcedure::s_pProcMain->m_pUITradeBuyInventory->ItemCountOK();
+							break;
 
 						default:
 							break;
@@ -134,6 +143,13 @@ bool CCountableItemEditDlg::ReceiveMessage(CN3UIBase* pSender, uint32_t dwMsg)
 					{
 						case UIWND_DISTRICT_PER_TRADE_MY:
 							CGameProcedure::s_pProcMain->m_pSubProcPerTrade->ItemCountCancel();
+							break;
+						case UIWND_DISTRICT_PER_TRADE_OTHER:
+							if (CGameProcedure::s_pProcMain->m_pUITradeInventory != nullptr
+								&& CGameProcedure::s_pProcMain->m_pUITradeInventory->IsVisible())
+								CGameProcedure::s_pProcMain->m_pUITradeInventory->ItemCountCancel();
+							else if (CGameProcedure::s_pProcMain->m_pUITradeBuyInventory != nullptr)
+								CGameProcedure::s_pProcMain->m_pUITradeBuyInventory->ItemCountCancel();
 							break;
 
 						default:
@@ -209,7 +225,15 @@ void CCountableItemEditDlg::Open(e_UIWND eUW, e_UIWND_DISTRICT eUD, bool bCountG
 			break;
 
 		case UIWND_PER_TRADE:
-			rc = CGameProcedure::s_pProcMain->m_pSubProcPerTrade->m_pUIPerTradeDlg->GetRegion();
+			if (eUD == UIWND_DISTRICT_PER_TRADE_OTHER
+				&& CGameProcedure::s_pProcMain->m_pUITradeInventory != nullptr
+				&& CGameProcedure::s_pProcMain->m_pUITradeInventory->IsVisible())
+				rc = CGameProcedure::s_pProcMain->m_pUITradeInventory->GetRegion();
+			else if (eUD == UIWND_DISTRICT_PER_TRADE_OTHER
+				&& CGameProcedure::s_pProcMain->m_pUITradeBuyInventory != nullptr)
+				rc = CGameProcedure::s_pProcMain->m_pUITradeBuyInventory->GetRegion();
+			else
+				rc = CGameProcedure::s_pProcMain->m_pSubProcPerTrade->m_pUIPerTradeDlg->GetRegion();
 			break;
 
 		case UIWND_WARE_HOUSE:

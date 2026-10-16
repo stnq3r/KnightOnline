@@ -14,6 +14,7 @@
 #include <spdlog/spdlog.h>
 #include <spdlog/fmt/ranges.h>
 
+#include <cstdlib>
 #include <unordered_set>
 
 namespace Ebenezer
@@ -72,6 +73,14 @@ void CUser::Initialize()
 
 	m_RegionX                 = -1;
 	m_RegionZ                 = -1;
+
+	// Personal merchant state
+	m_bMerchantState          = MERCHANT_STATE_NONE;
+	m_sMerchantsSocketID      = -1;
+	m_arMerchantLookers.clear();
+	m_strMerchantMessage.clear();
+	for (auto& merch : m_arMerchantItems)
+		merch = _MERCH_DATA {};
 
 	m_sBodyAc                 = 0;
 	m_sTotalHit               = 0;
@@ -460,6 +469,13 @@ bool CUser::PullOutCore(char*& data, int& length)
 
 void CUser::CloseProcess()
 {
+	// Clean up any personal merchant state before we leave.
+	if (isMerchanting())
+		MerchantClose();
+
+	if (m_sMerchantsSocketID >= 0)
+		RemoveFromMerchantLookers();
+
 	UserInOut(USER_OUT);
 
 	if (m_sPartyIndex != -1)
@@ -503,7 +519,7 @@ void CUser::Parsing(int len, char* pData)
 
 	uint8_t command    = GetByte(pData, index);
 
-	spdlog::trace("User::Parsing: userId={} charId={} command={:02X} len={}", GetSocketID(),
+	spdlog::info("User::Parsing: userId={} charId={} command={:02X} len={}", GetSocketID(),
 		m_pUserData->m_id, command, len);
 
 	switch (command)
@@ -630,6 +646,12 @@ void CUser::Parsing(int len, char* pData)
 
 		case WIZ_EXCHANGE:
 			ExchangeProcess(pData + index);
+			break;
+
+		case WIZ_MERCHANT:
+			spdlog::info("User::PacketProcess WIZ_MERCHANT received [accountName={} characterName={} socketId={}]",
+				m_strAccountID, m_pUserData->m_id, _socketId);
+			MerchantProcess(pData + index, len - index);
 			break;
 
 		case WIZ_MAGIC_PROCESS:
@@ -1513,6 +1535,20 @@ void CUser::MoveProcess(char* pBuf)
 	speed  = GetShort(pBuf, index);
 	echo   = GetByte(pBuf, index);
 
+	// A published shop is stationary. The client asks before closing it and
+	// sends the close packet before the movement packet on the same socket.
+	// Accept the stop notification but clamp it to the server's current point;
+	// otherwise a speed-zero packet could still relocate a merchant.
+	if (isMerchanting())
+	{
+		if (speed != 0)
+			return;
+
+		will_x = static_cast<uint16_t>(m_fWill_x * 10.0f);
+		will_z = static_cast<uint16_t>(m_fWill_z * 10.0f);
+		will_y = static_cast<int16_t>(m_fWill_y * 10.0f);
+	}
+
 	real_x = will_x / 10.0f;
 	real_z = will_z / 10.0f;
 	real_y = will_y / 10.0f;
@@ -1694,6 +1730,10 @@ void CUser::Attack(char* pBuf)
 			m_pUserData->m_id, _socketId, m_bResHpType, m_pUserData->m_sHp);
 		return;
 	}
+
+	// A merchant cannot attack while their personal shop is open.
+	if (isMerchanting())
+		return;
 
 	// 비러머글 해킹툴 유저 --;
 	// This checks if such an item exists.
@@ -2692,6 +2732,10 @@ void CUser::ZoneChange(int zone, float x, float z)
 
 	m_bZoneChangeFlag = true;
 	m_bWarp           = 0x01;
+	if (isMerchanting())
+		MerchantClose();
+	if (m_sMerchantsSocketID >= 0)
+		RemoveFromMerchantLookers();
 
 	UserInOut(USER_OUT);
 
@@ -2798,6 +2842,13 @@ void CUser::Warp(float x, float z)
 {
 	if (m_bWarp)
 		return;
+
+	// A warp (including summon spells) ends any personal shop, matching the
+	// movement and zone-change behaviour.
+	if (isMerchanting())
+		MerchantClose();
+	if (m_sMerchantsSocketID >= 0)
+		RemoveFromMerchantLookers();
 
 	//	if (m_pUserData->m_bAuthority != AUTHORITY_MANAGER)
 	//		return;
@@ -2910,6 +2961,17 @@ void CUser::RegisterRegion()
 		m_RegionZ = iRegZ;
 		pMap->RegionUserAdd(m_RegionX, m_RegionZ, _socketId);
 
+		if (m_sMerchantsSocketID >= 0)
+		{
+			auto pMerchant = m_pMain->GetUserPtr(m_sMerchantsSocketID);
+			const bool remainsInRegion = pMerchant != nullptr && pMerchant->m_pUserData != nullptr
+				&& pMerchant->m_pUserData->m_bZone == m_pUserData->m_bZone
+				&& std::abs(static_cast<int>(pMerchant->m_RegionX) - m_RegionX) <= 1
+				&& std::abs(static_cast<int>(pMerchant->m_RegionZ) - m_RegionZ) <= 1;
+			if (!remainsInRegion)
+				RemoveFromMerchantLookers();
+		}
+
 		if (_state == CONNECTION_STATE_GAMESTART)
 		{
 			// delete user 는 계산 방향이 진행방향의 반대...
@@ -2920,6 +2982,9 @@ void CUser::RegisterRegion()
 
 			m_pMain->RegionNpcInfoForMe(this);
 			m_pMain->RegionUserInOutForMe(this);
+			PruneMerchantLookersOutsideRegion();
+			if (isMerchanting())
+				BroadcastMerchantAnnouncement();
 		}
 
 		// TRACE(_T("User를 Region에 등록,, region_x=%d, y=%d\n"), m_RegionX, m_RegionZ);
@@ -3060,6 +3125,7 @@ void CUser::RequestUserIn(char* pBuf)
 		Send(sendBuffer, sendIndex);
 	else
 		SendCompressingPacket(sendBuffer, sendIndex);
+	SendMerchantAnnouncementsForRegion();
 }
 
 void CUser::RequestNpcIn(char* pBuf)
@@ -4037,6 +4103,10 @@ void CUser::HpChange(int amount, int type, bool attack)
 		m_pMain->Send_PartyMember(m_sPartyIndex, sendBuffer, sendIndex);
 	}
 
+	// Taking damage breaks a personal shop (any hit, not just a killing blow).
+	if (amount < 0 && isMerchanting())
+		MerchantClose();
+
 	// 직접 가격해서 죽는경우는 Dead Packet 없음
 	if (m_pUserData->m_sHp == 0 && !attack)
 		Dead();
@@ -4226,6 +4296,11 @@ void CUser::SetUserAbility()
 
 void CUser::ItemMove(char* pBuf)
 {
+	// A merchant cannot move/equip/unequip items while their shop is open;
+	// doing so can desync listed items and lead to duplication.
+	if (isMerchanting())
+		return;
+
 	int index = 0, itemid = 0, srcpos = -1, destpos = -1, sendIndex = 0;
 	model::Item* pTable = nullptr;
 	uint8_t dir         = 0;
@@ -6107,6 +6182,10 @@ void CUser::PartyRequest(int memberid, bool bCreate)
 	if (pUser == nullptr)
 		goto fail_return;
 
+	// Personal shops block party invites in both directions.
+	if (isMerchanting() || pUser->isMerchanting())
+		goto fail_return;
+
 	//이미 파티 가입되어 있으면 안되징...
 	if (pUser->m_sPartyIndex != -1)
 		goto fail_return;
@@ -6523,6 +6602,10 @@ void CUser::ExchangeReq(char* pBuf)
 
 	pUser = m_pMain->GetUserPtr(destid);
 	if (pUser == nullptr)
+		goto fail_return;
+
+	// Personal shops block trade requests in both directions.
+	if (isMerchanting() || pUser->isMerchanting())
 		goto fail_return;
 
 	if (pUser->m_sExchangeUser != -1)

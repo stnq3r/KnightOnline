@@ -38,6 +38,7 @@ add_library(Ebenezer.Core
   MagicProcess.h
   Map.cpp
   Map.h
+  MerchantHandler.cpp
   Npc.cpp
   Npc.h
   OperationMessage.cpp

@@ -18,6 +18,8 @@
 #include <N3Base/N3ShapeMgr.h>
 #include <N3Base/N3SndObj.h>
 
+#include <limits>
+
 CPlayerMySelf::CPlayerMySelf()
 {
 	m_ePlayerType       = PLAYER_MYSELF;      // Player Type ... Base, NPC, OTher, MySelf
@@ -1099,6 +1101,16 @@ void CPlayerMySelf::StunRelease()                                              /
 
 void CPlayerMySelf::TargetOrPosMove()
 {
+	if (CGameProcedure::s_pProcMain != nullptr && IDNumber() >= 0
+		&& IDNumber() <= std::numeric_limits<int16_t>::max()
+		&& CGameProcedure::s_pProcMain->IsMerchantOwnerActive(static_cast<int16_t>(IDNumber())))
+	{
+		this->ActionMove(PSM_STOP);
+		if (m_bTargetOrPosMove)
+			CGameProcedure::s_pProcMain->RequestMerchantTargetMoveConfirmation();
+		return;
+	}
+
 	if (!m_bTargetOrPosMove)
 		return;
 

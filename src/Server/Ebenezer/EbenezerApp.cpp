@@ -1543,6 +1543,7 @@ void EbenezerApp::UserInOutForMe(CUser* pSendUser)
 	SetShort(sendBuffer, t_count, temp_index);
 
 	pSendUser->SendCompressingPacket(sendBuffer, sendIndex);
+	pSendUser->SendMerchantAnnouncementsForRegion();
 }
 
 void EbenezerApp::RegionUserInOutForMe(CUser* pSendUser)

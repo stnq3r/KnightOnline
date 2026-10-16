@@ -125,6 +125,11 @@ void CMagicProcess::MagicPacket(char* pBuf)
 				pSrcUser->m_pUserData->m_sHp);
 			return;
 		}
+
+		// A merchant cannot cast or apply magic while their personal shop is open.
+		if (pSrcUser->isMerchanting()
+			&& (command == MAGIC_CASTING || command == MAGIC_EFFECTING))
+			return;
 	}
 
 	auto pTUser = m_pMain->GetUserPtr(tid);

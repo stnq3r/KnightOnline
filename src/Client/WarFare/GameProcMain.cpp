@@ -2,7 +2,13 @@
 //
 //////////////////////////////////////////////////////////////////////
 #include "StdAfx.h"
+#include <algorithm>
+#include <cstdio>
+#include <cstdarg>
+#include <limits>
+#include <vector>
 #include "GameProcMain.h"
+#include "PlayerBase.h"
 
 #include "GameEng.h"
 #include "LocalInput.h"
@@ -48,6 +54,8 @@
 #include "UITradeSellBBS.h"
 #include "UITradeBBSSelector.h"
 #include "UITradeBBSEditDlg.h"
+#include "UITradeInventory.h"
+#include "UITradeBuyInventory.h"
 #include "UIQuestMenu.h"
 #include "UIQuestTalk.h"
 #include "UIDead.h"
@@ -143,6 +151,9 @@ CGameProcMain::CGameProcMain()     // r기본 생성자.. 각 변수의 역활�
 	m_pUIItemUpgrade        = new CUIItemUpgrade();
 	m_pUILevelGuide         = new CUILevelGuide();
 
+	m_pUITradeInventory     = new CUITradeInventory();
+	m_pUITradeBuyInventory  = new CUITradeBuyInventory();
+
 	m_pSubProcPerTrade      = new CSubProcPerTrade();
 	m_pMagicSkillMng        = new CMagicSkillMng(this);
 	m_pTargetSymbol         = new CN3Shape(); // 플레이어가 타겟으로 잡은 캐릭터의 위치위에 그리면 된다..
@@ -193,6 +204,8 @@ CGameProcMain::~CGameProcMain()
 	delete m_pUIUpgradeSelect;
 	delete m_pUIItemUpgrade;
 	delete m_pUILevelGuide;
+	delete m_pUITradeInventory;
+	delete m_pUITradeBuyInventory;
 
 	delete m_pSubProcPerTrade;
 	delete m_pMagicSkillMng;
@@ -682,6 +695,7 @@ void CGameProcMain::Render()
 
 	ACT_WORLD->RenderTerrain();   // 지형 렌더..
 	ACT_WORLD->RenderShape();     // 물체 렌더..
+	MerchantPreviewTooltipReset(); // hide board tooltip; hover re-shows it
 	s_pOPMgr->Render(fSunAngle);  // 다른 플레이어 렌더..
 	s_pPlayer->Render(fSunAngle); // 플레이어 렌더..
 
@@ -816,8 +830,12 @@ bool CGameProcMain::ProcessPacket(Packet& pkt)
 		}
 			return true;
 
-		case WIZ_EVENT:
+		case WIZ_MERCHANT:
 		case WIZ_MERCHANT_INOUT:
+			this->MsgRecv_Merchant(pkt);
+			return true;
+
+		case WIZ_EVENT:
 		{
 			// need to implement these
 		}
@@ -2640,6 +2658,7 @@ bool CGameProcMain::MsgRecv_UserIn(Packet& pkt, bool bWithFX)
 	pUPC->MoveTo(fXPos, fYPos, fZPos, 0, 0);                 // 현재 위치..
 	pUPC->RotateTo(DegreesToRadians(rand() % 360), true);
 	s_pOPMgr->UPCAdd(pUPC);                                  // 캐릭터 추가...
+	RefreshMerchantOwnerVisual(static_cast<int16_t>(iID));
 
 	//if(bWithFX)
 	if (bWithFX && pUPC->m_InfoBase.iAuthority != AUTHORITY_MANAGER)
@@ -2701,7 +2720,12 @@ bool CGameProcMain::MsgRecv_UserIn(Packet& pkt, bool bWithFX)
 
 bool CGameProcMain::MsgRecv_UserOut(Packet& pkt)
 {
+	if (pkt.size() - pkt.rpos() < sizeof(int16_t))
+		return false;
+
 	int iID          = pkt.read<int16_t>();
+	if (iID >= 0)
+		ForgetMerchantOwner(static_cast<int16_t>(iID));
 
 	//죽은 상태의 캐릭터를 시체로 만든다.
 	CPlayerNPC* pUPC = s_pOPMgr->UPCGetByID(iID, false);
@@ -3586,20 +3610,95 @@ void CGameProcMain::MsgRecv_ItemRepair(Packet& pkt) // Item Repair Result..
 
 void CGameProcMain::MsgRecv_ItemCountChange(Packet& pkt) // Item Count Change..
 {
-	int iTotalCount = pkt.read<int16_t>();               // Trade id
+	constexpr size_t BaseEntrySize = sizeof(uint8_t) * 2 + sizeof(uint32_t) * 2;
+	constexpr size_t ExtendedEntrySize = BaseEntrySize + sizeof(uint8_t) + sizeof(uint16_t);
+	const size_t payloadSize = pkt.size() - pkt.rpos();
+	if (payloadSize < sizeof(int16_t))
+		return;
 
-	for (int i = 0; i < iTotalCount; i++)
+	const int16_t entryCount = pkt.read<int16_t>();
+	if (entryCount < 0)
+		return;
+
+	const size_t entriesSize = payloadSize - sizeof(int16_t);
+	const bool hasExtendedFields = entriesSize == static_cast<size_t>(entryCount) * ExtendedEntrySize;
+	if (!hasExtendedFields && entriesSize != static_cast<size_t>(entryCount) * BaseEntrySize)
+		return;
+
+	struct ItemCountChangeEntry
 	{
-		int iDistrict   = pkt.read<uint8_t>();
-		int iIndex      = pkt.read<uint8_t>();
-		int iID         = pkt.read<uint32_t>();
-		int iCount      = pkt.read<uint32_t>();
-		int iNewItem    = pkt.read<uint8_t>(); // 100 for new items, 0 otherwise
-		int iDurability = pkt.read<uint16_t>();
+		uint8_t district;
+		uint8_t slot;
+		uint32_t itemID;
+		uint32_t count;
+		uint8_t newItem = 0;
+		int16_t durability = 0;
+		bool hasDurability = false;
+	};
 
-		m_pUIInventory->ItemCountChange(iDistrict, iIndex, iCount, iID, iDurability);
+	std::vector<ItemCountChangeEntry> entries;
+	entries.reserve(static_cast<size_t>(entryCount));
+	for (int i = 0; i < entryCount; i++)
+	{
+		ItemCountChangeEntry entry {};
+		entry.district = pkt.read<uint8_t>();
+		entry.slot = pkt.read<uint8_t>();
+		entry.itemID = pkt.read<uint32_t>();
+		entry.count = pkt.read<uint32_t>();
+		if (hasExtendedFields)
+		{
+			entry.newItem = pkt.read<uint8_t>();
+			entry.durability = pkt.read<int16_t>();
+			entry.hasDurability = true;
+		}
 
-		if (iNewItem == ITEM_COUNT_CHANGE_NEW)
+		const bool validSlot = (entry.district == 0 && entry.slot < ITEM_SLOT_COUNT)
+			|| (entry.district == 1 && entry.slot < MAX_ITEM_INVENTORY);
+		if (!validSlot || entry.itemID == 0 || entry.itemID > static_cast<uint32_t>(std::numeric_limits<int>::max())
+			|| entry.count > static_cast<uint32_t>(std::numeric_limits<int16_t>::max())
+			|| (entry.hasDurability && entry.durability < 0)
+			|| (entry.newItem != 0 && entry.newItem != ITEM_COUNT_CHANGE_NEW))
+			return;
+
+		entries.push_back(entry);
+	}
+
+	// Validate the full packet before any UI or inventory state is changed.
+	for (const ItemCountChangeEntry& entry : entries)
+	{
+		const int iID = static_cast<int>(entry.itemID);
+		const int iCount = static_cast<int>(entry.count);
+		const int iDurability = entry.hasDurability ? static_cast<int>(entry.durability) : -1;
+		if (entry.district == 1 && m_pUITradeInventory != nullptr
+			&& m_pUITradeInventory->OwnsListedInventorySlot(entry.slot, iID))
+		{
+			// The seller's listed item is owned by the merchant UI, even while
+			// that window is hidden. Do not create a duplicate in the bag UI.
+			m_pUITradeInventory->ReceiveItemCountChange(entry.slot, iCount, iID, iDurability);
+		}
+		else if (entry.district == 1 && m_pUITradeBuyInventory != nullptr
+			&& m_pUITradeBuyInventory->IsVisible())
+		{
+			m_pUITradeBuyInventory->ReceiveItemCountChange(entry.slot, iCount, iID, iDurability);
+		}
+		else if (entry.district == 1 && m_pUITradeInventory != nullptr
+			&& m_pUITradeInventory->IsVisible())
+		{
+			m_pUITradeInventory->ReceiveItemCountChange(entry.slot, iCount, iID, iDurability);
+		}
+		else if (m_pUIInventory != nullptr)
+		{
+			// A zero count clears only the matching existing slot. The legacy
+			// response does not contain enough data to construct a replacement.
+			__IconItemSkill* current = entry.district == 0
+				? m_pUIInventory->m_pMySlot[entry.slot]
+				: m_pUIInventory->m_pMyInvWnd[entry.slot];
+			if (iCount > 0 || (current != nullptr && current->GetItemID() == iID))
+				m_pUIInventory->ItemCountChange(entry.district, entry.slot, iCount, iID,
+					std::max(iDurability, 0));
+		}
+
+		if (entry.newItem == ITEM_COUNT_CHANGE_NEW)
 		{
 			__TABLE_ITEM_BASIC* pItem = s_pTbl_Items_Basic.Find(iID / 1000 * 1000);
 			if (pItem != nullptr)
@@ -4071,6 +4170,27 @@ void CGameProcMain::InitUI()
 	m_pUIInventory->SetState(UI_STATE_COMMON_NONE);
 	m_pUIInventory->SetStyle(m_pUIInventory->GetStyle() | UISTYLE_POS_RIGHT);
 
+	// Personal merchant (player shop) windows.
+	m_pUITradeInventory->Init(s_pUIMgr);
+	m_pUITradeInventory->LoadFromFile(pTbl->szTradeInv);
+	m_pUITradeInventory->SetVisibleWithNoSound(false);
+	rc = m_pUITradeInventory->GetRegion();
+	m_pUITradeInventory->SetPos((iW - (rc.right - rc.left)) / 2, (iH - (rc.bottom - rc.top)) / 2);
+	m_pUITradeInventory->InitIconWnd(UIWND_PER_TRADE);
+	m_pUITradeInventory->SetUIType(UI_TYPE_ICON_MANAGER);
+	m_pUITradeInventory->SetState(UI_STATE_COMMON_NONE);
+	m_pUITradeInventory->SetStyle(m_pUITradeInventory->GetStyle() | UISTYLE_USER_MOVE_HIDE);
+
+	m_pUITradeBuyInventory->Init(s_pUIMgr);
+	m_pUITradeBuyInventory->LoadFromFile(pTbl->szTradeBuyInv);
+	m_pUITradeBuyInventory->SetVisibleWithNoSound(false);
+	rc = m_pUITradeBuyInventory->GetRegion();
+	m_pUITradeBuyInventory->SetPos((iW - (rc.right - rc.left)) / 2, (iH - (rc.bottom - rc.top)) / 2);
+	m_pUITradeBuyInventory->InitIconWnd(UIWND_PER_TRADE);
+	m_pUITradeBuyInventory->SetUIType(UI_TYPE_ICON_MANAGER);
+	m_pUITradeBuyInventory->SetState(UI_STATE_COMMON_NONE);
+	m_pUITradeBuyInventory->SetStyle(m_pUITradeBuyInventory->GetStyle() | UISTYLE_USER_MOVE_HIDE);
+
 	// Countable Item Edit Dlg..
 	CN3UIWndBase::s_pCountableItemEdit = new CCountableItemEditDlg;
 	CN3UIWndBase::s_pCountableItemEdit->Init(s_pUIMgr);
@@ -4438,6 +4558,8 @@ void CGameProcMain::InitZone(int iZone, const __Vector3& vPosPlayer)
 	static int iZonePrev = -1;
 	if (iZonePrev != iZone)   // 다른 존일 경우에만 로딩..
 	{
+		ClearMerchantOwnerState();
+
 		m_pLightMgr->Release();
 		s_pEng->SetDefaultLight(m_pLightMgr->Light(0), m_pLightMgr->Light(1), m_pLightMgr->Light(2));
 
@@ -4598,6 +4720,24 @@ bool CGameProcMain::CommandToggleMoveContinous()
 
 void CGameProcMain::CommandMove(e_MoveDirection eMD, bool bStartOrEnd)
 {
+	if ((eMD == MD_FORWARD || eMD == MD_BACKWARD) && !m_bMerchantMoveConfirmPending
+		&& s_pPlayer != nullptr && s_pPlayer->IDNumber() >= 0
+		&& s_pPlayer->IDNumber() <= std::numeric_limits<int16_t>::max()
+		&& IsMerchantOwnerActive(static_cast<int16_t>(s_pPlayer->IDNumber())))
+	{
+		s_pPlayer->m_bTargetOrPosMove = false;
+		s_pPlayer->m_iMoveTarget = -1;
+		s_pPlayer->ActionMove(PSM_STOP);
+		m_bMerchantMoveConfirmPending = true;
+		m_bPendingMerchantTargetMove = false;
+		m_ePendingMerchantMoveDirection = eMD;
+		m_bPendingMerchantMoveStart = bStartOrEnd;
+		MessageBoxPost("Moving will close your merchant. Continue?", "", MB_YESNO, BEHAVIOR_MERCHANT_MOVE);
+		return;
+	}
+	if (m_bMerchantMoveConfirmPending)
+		return;
+
 	if (bStartOrEnd)
 		this->CloseUIs(); // 각종 상거래, 워프등등... UI 닫기..
 
@@ -5902,6 +6042,36 @@ void CGameProcMain::ParseChattingCommand(const std::string& szCmd)
 					m_pUIQuestMenu->SetVisible(false);
 
 				m_pSubProcPerTrade->EnterWaitMsgFromServerStatePerTradeReq();
+			}
+		}
+		break;
+
+		case CMD_MERCHANT:
+		{
+			if (m_pUITradeInventory->IsVisible())
+			{
+				m_pUITradeInventory->Close(true);
+			}
+			else if (m_pUITradeBuyInventory->IsVisible())
+			{
+				m_pUITradeBuyInventory->Close();
+			}
+			else if (TryOpenTargetMerchant())
+			{
+				// The successful, matching list response opens the buyer window.
+			}
+			else if (s_pPlayer != nullptr
+				&& s_pPlayer->IDNumber() >= 0
+				&& s_pPlayer->IDNumber() <= std::numeric_limits<int16_t>::max()
+				&& m_MerchantOwners.find(static_cast<int16_t>(s_pPlayer->IDNumber())) != m_MerchantOwners.end())
+			{
+				// Our own announcement confirms the seller is active. Do not send
+				// another open request, which the server treats as a stale shop.
+			}
+			else
+			{
+				m_iPendingMerchantListUID = -1;
+				MsgSend_MerchantOpen();
 			}
 		}
 		break;
@@ -7573,6 +7743,9 @@ bool CGameProcMain::OnMouseLDBtnPress(POINT /*ptCur*/, POINT /*ptPrev*/)
 	if (s_pUIMgr->m_bDoneSomething)
 		return false;
 
+	if (TryOpenTargetMerchant())
+		return true;
+
 	TryStartAttack();
 
 	return true;
@@ -7807,6 +7980,19 @@ bool CGameProcMain::OnMouseRBtnPress(POINT ptCur, POINT /*ptPrev*/)
 
 	int iID          = -1;
 	CPlayerNPC* pNPC = s_pOPMgr->PickNPC(ptCur.x, ptCur.y, iID); // 픽킹..
+	if (pNPC == nullptr)
+	{
+		CPlayerOther* pPlayer = s_pOPMgr->PickUPC(ptCur.x, ptCur.y, iID);
+		if (pPlayer != nullptr)
+		{
+			if (pPlayer->IDNumber() == s_pPlayer->m_iIDTarget && TryOpenTargetMerchant())
+				return true;
+
+			// A player is not an NPC event target. Merchant browsing is the
+			// player interaction handled by this right-click path.
+			return true;
+		}
+	}
 
 	if (nullptr == pNPC)
 	{
@@ -8049,5 +8235,581 @@ void CGameProcMain::MsgRecv_ZoneAbility(Packet& pkt)
 		s_pPlayer->m_InfoExt.eZoneAbilityType         = (e_ZoneAbilityType) pkt.read<uint8_t>();
 		s_pPlayer->m_InfoExt.bCanTalkToOtherNation    = pkt.read<bool>();
 		s_pPlayer->m_InfoExt.sZoneTariff              = pkt.read<int16_t>();
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Personal merchant (player shop) — messages
+// ---------------------------------------------------------------------------
+
+static FILE* MerchantTraceFile() { static FILE* fp = nullptr; if (fp == nullptr) { fp = fopen("./merchant-trace.txt", "a"); } return fp; }
+static void MerchantTrace(const char* fmt, ...) { FILE* fp = MerchantTraceFile(); if (fp == nullptr) return; va_list ap; va_start(ap, fmt); vfprintf(fp, fmt, ap); va_end(ap); fputc('\n', fp); fflush(fp); }
+
+void CGameProcMain::MsgSend_MerchantOpen()
+{
+	m_iPendingMerchantListUID = -1;
+	MerchantTrace("[S-T] MerchantOpen socket=%p", (void*)s_pSocket);
+	int iOffset = 0;
+	uint8_t byBuff[8];
+	CAPISocket::MP_AddByte(byBuff, iOffset, WIZ_MERCHANT);
+	CAPISocket::MP_AddByte(byBuff, iOffset, MERCHANT_OPEN);
+	if (s_pSocket != nullptr) s_pSocket->Send(byBuff, iOffset);
+}
+
+void CGameProcMain::MsgSend_MerchantClose()
+{
+	m_iPendingMerchantListUID = -1;
+	MerchantTrace("[S-T] MerchantClose socket=%p", (void*)s_pSocket);
+	int iOffset = 0;
+	uint8_t byBuff[8];
+	CAPISocket::MP_AddByte(byBuff, iOffset, WIZ_MERCHANT);
+	CAPISocket::MP_AddByte(byBuff, iOffset, MERCHANT_CLOSE);
+	if (s_pSocket != nullptr) s_pSocket->Send(byBuff, iOffset);
+}
+
+void CGameProcMain::MsgSend_MerchantItemAdd(int iItemID, int iCount, int iPrice, int iSrcInvOrder, int iDstShopOrder, uint8_t bMode)
+{
+	MerchantTrace("[S-T] MerchantItemAdd item=%d cnt=%d price=%d src=%d dst=%d socket=%p", iItemID, iCount, iPrice, iSrcInvOrder, iDstShopOrder, (void*)s_pSocket);
+	int iOffset = 0;
+	uint8_t byBuff[32];
+	CAPISocket::MP_AddByte(byBuff, iOffset, WIZ_MERCHANT);
+	CAPISocket::MP_AddByte(byBuff, iOffset, MERCHANT_ITEM_ADD);
+	CAPISocket::MP_AddDword(byBuff, iOffset, static_cast<uint32_t>(iItemID));
+	CAPISocket::MP_AddShort(byBuff, iOffset, static_cast<int16_t>(iCount));
+	CAPISocket::MP_AddDword(byBuff, iOffset, static_cast<uint32_t>(iPrice));
+	CAPISocket::MP_AddByte(byBuff, iOffset, static_cast<uint8_t>(iSrcInvOrder));
+	CAPISocket::MP_AddByte(byBuff, iOffset, static_cast<uint8_t>(iDstShopOrder));
+	CAPISocket::MP_AddByte(byBuff, iOffset, bMode);
+	if (s_pSocket != nullptr) s_pSocket->Send(byBuff, iOffset);
+}
+
+void CGameProcMain::MsgSend_MerchantItemCancel(int iShopOrder)
+{
+	MerchantTrace("[S-T] MerchantItemCancel pos=%d", iShopOrder);
+	int iOffset = 0;
+	uint8_t byBuff[8];
+	CAPISocket::MP_AddByte(byBuff, iOffset, WIZ_MERCHANT);
+	CAPISocket::MP_AddByte(byBuff, iOffset, MERCHANT_ITEM_CANCEL);
+	CAPISocket::MP_AddByte(byBuff, iOffset, static_cast<uint8_t>(iShopOrder));
+	if (s_pSocket != nullptr) s_pSocket->Send(byBuff, iOffset);
+}
+
+void CGameProcMain::MsgSend_MerchantItemList(int iMerchantUID)
+{
+	MerchantTrace("[S-T] MerchantItemList uid=%d", iMerchantUID);
+	int iOffset = 0;
+	uint8_t byBuff[8];
+	CAPISocket::MP_AddByte(byBuff, iOffset, WIZ_MERCHANT);
+	CAPISocket::MP_AddByte(byBuff, iOffset, MERCHANT_ITEM_LIST);
+	CAPISocket::MP_AddShort(byBuff, iOffset, static_cast<int16_t>(iMerchantUID));
+	if (s_pSocket != nullptr) s_pSocket->Send(byBuff, iOffset);
+}
+
+bool CGameProcMain::RequestMerchantListForOwner(int16_t ownerSocketID)
+{
+	m_iPendingMerchantListUID = -1;
+	if (ownerSocketID < 0 || s_pPlayer == nullptr || s_pOPMgr == nullptr || s_pSocket == nullptr
+		|| ownerSocketID == s_pPlayer->IDNumber()
+		|| m_MerchantOwners.find(ownerSocketID) == m_MerchantOwners.end())
+		return false;
+
+	CPlayerOther* pOwner = s_pOPMgr->UPCGetByID(ownerSocketID, false);
+	if (pOwner == nullptr
+		|| (pOwner->Position() - s_pPlayer->Position()).Magnitude() >= (pOwner->Height() + 5.0f))
+		return false;
+
+	m_iPendingMerchantListUID = ownerSocketID;
+	MsgSend_MerchantItemList(ownerSocketID);
+	return true;
+}
+
+bool CGameProcMain::TryOpenTargetMerchant()
+{
+	// A failed/new target attempt supersedes any earlier list request.
+	m_iPendingMerchantListUID = -1;
+	if (s_pPlayer == nullptr)
+		return false;
+
+	const int ownerID = s_pPlayer->m_iIDTarget;
+	if (ownerID < 0 || ownerID > std::numeric_limits<int16_t>::max())
+		return false;
+
+	return RequestMerchantListForOwner(static_cast<int16_t>(ownerID));
+}
+
+bool CGameProcMain::IsMerchantOwnerActive(int16_t ownerSocketID) const
+{
+	return ownerSocketID >= 0 && m_MerchantOwners.find(ownerSocketID) != m_MerchantOwners.end();
+}
+
+void CGameProcMain::ResolveMerchantMove(bool bAccept)
+{
+	if (!m_bMerchantMoveConfirmPending)
+		return;
+
+	const e_MoveDirection direction = m_ePendingMerchantMoveDirection;
+	const bool bStartOrEnd = m_bPendingMerchantMoveStart;
+	const bool targetMove = m_bPendingMerchantTargetMove;
+	m_bMerchantMoveConfirmPending = false;
+	m_ePendingMerchantMoveDirection = MD_STOP;
+	m_bPendingMerchantMoveStart = false;
+	m_bPendingMerchantTargetMove = false;
+
+	if (!bAccept || s_pPlayer == nullptr)
+	{
+		if (s_pPlayer != nullptr)
+		{
+			s_pPlayer->m_bTargetOrPosMove = false;
+			s_pPlayer->m_iMoveTarget = -1;
+			s_pPlayer->ActionMove(PSM_STOP);
+		}
+		return;
+	}
+
+	const int playerID = s_pPlayer->IDNumber();
+	if (playerID >= 0 && playerID <= std::numeric_limits<int16_t>::max())
+	{
+		const int16_t ownerSocketID = static_cast<int16_t>(playerID);
+		if (IsMerchantOwnerActive(ownerSocketID))
+		{
+			// TCP preserves this order: close the shop on the server before the
+			// movement packet sent by CommandMove below.
+			MsgSend_MerchantClose();
+			ForgetMerchantOwner(ownerSocketID);
+		}
+	}
+
+	if (!targetMove)
+		CommandMove(direction, bStartOrEnd);
+}
+
+void CGameProcMain::RequestMerchantTargetMoveConfirmation()
+{
+	if (m_bMerchantMoveConfirmPending || s_pPlayer == nullptr)
+		return;
+
+	m_bMerchantMoveConfirmPending = true;
+	m_bPendingMerchantTargetMove = true;
+	m_ePendingMerchantMoveDirection = MD_STOP;
+	m_bPendingMerchantMoveStart = false;
+	MessageBoxPost("Moving will close your merchant. Continue?", "", MB_YESNO, BEHAVIOR_MERCHANT_MOVE);
+}
+
+void CGameProcMain::ForgetMerchantOwner(int16_t ownerSocketID)
+{
+	if (s_pPlayer != nullptr && s_pPlayer->IDNumber() == ownerSocketID)
+		s_pPlayer->MerchantStringSet("", false);
+	else if (s_pOPMgr != nullptr)
+	{
+		CPlayerOther* pOwner = s_pOPMgr->UPCGetByID(ownerSocketID, false);
+		if (pOwner != nullptr)
+			pOwner->MerchantStringSet("", false);
+	}
+
+	m_MerchantOwners.erase(ownerSocketID);
+	if (m_iPendingMerchantListUID == ownerSocketID)
+		m_iPendingMerchantListUID = -1;
+
+	if (m_pUITradeBuyInventory != nullptr && m_pUITradeBuyInventory->IsVisible()
+		&& m_pUITradeBuyInventory->m_iMerchantUID == ownerSocketID)
+		m_pUITradeBuyInventory->Close(false);
+
+	if (s_pPlayer != nullptr && s_pPlayer->IDNumber() == ownerSocketID && m_pUITradeInventory != nullptr)
+		m_pUITradeInventory->OnMerchantClosed();
+}
+
+void CGameProcMain::RefreshMerchantOwnerVisual(int16_t ownerSocketID)
+{
+	auto it = m_MerchantOwners.find(ownerSocketID);
+	if (it == m_MerchantOwners.end())
+		return;
+
+	if (s_pPlayer != nullptr && s_pPlayer->IDNumber() == ownerSocketID)
+		s_pPlayer->MerchantStringSet(it->second.message, true, it->second.previewItemIDs, it->second.previewPrices);
+	else if (s_pOPMgr != nullptr)
+	{
+		CPlayerOther* pOwner = s_pOPMgr->UPCGetByID(ownerSocketID, false);
+		if (pOwner != nullptr)
+			pOwner->MerchantStringSet(it->second.message, true, it->second.previewItemIDs, it->second.previewPrices);
+	}
+}
+
+void CGameProcMain::ClearMerchantOwnerState()
+{
+	for (const auto& [ownerSocketID, _] : m_MerchantOwners)
+	{
+		if (s_pPlayer != nullptr && s_pPlayer->IDNumber() == ownerSocketID)
+			s_pPlayer->MerchantStringSet("", false);
+		else if (s_pOPMgr != nullptr)
+		{
+			CPlayerOther* pOwner = s_pOPMgr->UPCGetByID(ownerSocketID, false);
+			if (pOwner != nullptr)
+				pOwner->MerchantStringSet("", false);
+		}
+	}
+	m_MerchantOwners.clear();
+	m_iPendingMerchantListUID = -1;
+	if (m_pUITradeBuyInventory != nullptr && m_pUITradeBuyInventory->IsVisible())
+		m_pUITradeBuyInventory->Close(false);
+}
+
+void CGameProcMain::MsgSend_MerchantItemBuy(int iItemID, int iCount, int iShopSlot, int iDestInvOrder)
+{
+	MerchantTrace("[S-T] MerchantItemBuy item=%d cnt=%d shop=%d dest=%d", iItemID, iCount, iShopSlot, iDestInvOrder);
+	int iOffset = 0;
+	uint8_t byBuff[16];
+	CAPISocket::MP_AddByte(byBuff, iOffset, WIZ_MERCHANT);
+	CAPISocket::MP_AddByte(byBuff, iOffset, MERCHANT_ITEM_BUY);
+	CAPISocket::MP_AddDword(byBuff, iOffset, static_cast<uint32_t>(iItemID));
+	CAPISocket::MP_AddShort(byBuff, iOffset, static_cast<int16_t>(iCount));
+	CAPISocket::MP_AddByte(byBuff, iOffset, static_cast<uint8_t>(iShopSlot));
+	CAPISocket::MP_AddByte(byBuff, iOffset, static_cast<uint8_t>(iDestInvOrder));
+	CAPISocket::MP_AddByte(byBuff, iOffset, 0); // rob_slot
+	if (s_pSocket != nullptr) s_pSocket->Send(byBuff, iOffset);
+}
+
+void CGameProcMain::MsgSend_MerchantInsert(const std::string& szMsg)
+{
+	int iMsgLen = static_cast<int>(szMsg.size());
+	if (iMsgLen > MAX_MERCH_MESSAGE)
+		iMsgLen = MAX_MERCH_MESSAGE;
+
+	MerchantTrace("[S-T] MerchantInsert msgLen=%d socket=%p", iMsgLen, (void*)s_pSocket);
+
+	uint8_t byBuff[4 + MAX_MERCH_MESSAGE] = {};
+	int iOffset = 0;
+	CAPISocket::MP_AddByte(byBuff, iOffset, WIZ_MERCHANT);
+	CAPISocket::MP_AddByte(byBuff, iOffset, MERCHANT_INSERT);
+	CAPISocket::MP_AddShort(byBuff, iOffset, static_cast<int16_t>(iMsgLen));
+	if (iMsgLen > 0)
+		memcpy(byBuff + iOffset, szMsg.data(), iMsgLen);
+	iOffset += iMsgLen;
+	if (s_pSocket != nullptr)
+		s_pSocket->Send(byBuff, iOffset);
+	MerchantTrace("[S-T] MerchantInsert sent iOffset=%d", iOffset);
+}
+
+void CGameProcMain::MsgSend_MerchantTradeCancel()
+{
+	m_iPendingMerchantListUID = -1;
+	if (s_pSocket == nullptr)
+		return;
+
+	int iOffset = 0;
+	uint8_t byBuff[8];
+	CAPISocket::MP_AddByte(byBuff, iOffset, WIZ_MERCHANT);
+	CAPISocket::MP_AddByte(byBuff, iOffset, MERCHANT_TRADE_CANCEL);
+	s_pSocket->Send(byBuff, iOffset);
+}
+
+void CGameProcMain::MsgRecv_Merchant(Packet& pkt)
+{
+	if (pkt.rpos() >= pkt.size())
+		return;
+
+	uint8_t sub = pkt.read<uint8_t>();
+	switch (sub)
+	{
+		case MERCHANT_OPEN:
+		{
+			if (pkt.size() - pkt.rpos() != sizeof(int16_t))
+				break;
+
+			int16_t result = pkt.read<int16_t>();
+			if (result == 1)
+			{
+				if (m_pUITradeInventory != nullptr)
+					m_pUITradeInventory->Open();
+			}
+			else
+			{
+				std::string szMsg;
+				switch (result)
+				{
+					case -1: szMsg = "Merchant: no session."; break;
+					case -2: szMsg = "Merchant: you are dead."; break;
+					case -3: szMsg = "Merchant: you are trading."; break;
+					case -4: szMsg = "Merchant: already merchanting."; break;
+					case -5: szMsg = "Merchant: not a merchant zone."; break;
+					case -6: szMsg = "Merchant: shopping."; break;
+					case 30: szMsg = "Merchant: under-leveled."; break;
+					default: szMsg = "Merchant: cannot open."; break;
+				}
+				MsgOutput(szMsg, 0xffff3b3b);
+			}
+		}
+		break;
+
+		case MERCHANT_CLOSE:
+		{
+			if (pkt.size() - pkt.rpos() != sizeof(int16_t))
+				break;
+
+			const int16_t ownerSocketID = pkt.read<int16_t>();
+			if (ownerSocketID >= 0)
+				ForgetMerchantOwner(ownerSocketID);
+		}
+		break;
+
+		case MERCHANT_ITEM_ADD:
+		{
+			constexpr size_t ResponseSize = sizeof(int16_t) + sizeof(uint32_t) + sizeof(int16_t) * 2
+				+ sizeof(uint32_t) + sizeof(uint8_t) * 2;
+			if (pkt.size() - pkt.rpos() != ResponseSize || m_pUITradeInventory == nullptr)
+				break;
+
+			const int16_t result = pkt.read<int16_t>();
+			const uint32_t itemID = pkt.read<uint32_t>();
+			const int16_t count = pkt.read<int16_t>();
+			const int16_t duration = pkt.read<int16_t>();
+			const uint32_t price = pkt.read<uint32_t>();
+			const uint8_t serverSrcSlot = pkt.read<uint8_t>();
+			const uint8_t dstSlot = pkt.read<uint8_t>();
+			if ((result != 0 && result != 1) || itemID == 0
+				|| itemID > static_cast<uint32_t>(std::numeric_limits<int>::max())
+				|| count <= 0 || duration < 0 || price == 0
+				|| price > static_cast<uint32_t>(std::numeric_limits<int>::max())
+				|| serverSrcSlot < SLOT_MAX || serverSrcSlot >= SLOT_MAX + HAVE_MAX
+				|| dstSlot >= MAX_MERCH_ITEMS)
+				break;
+
+			const int srcInventoryOrder = serverSrcSlot - SLOT_MAX;
+			m_pUITradeInventory->ReceiveItemAdd(result == 1, static_cast<int>(itemID),
+				static_cast<int>(count), static_cast<int>(duration), static_cast<int>(price),
+				srcInventoryOrder, static_cast<int>(dstSlot));
+		}
+		break;
+
+		case MERCHANT_ITEM_CANCEL:
+		{
+			if (pkt.size() - pkt.rpos() < sizeof(int16_t) || m_pUITradeInventory == nullptr)
+				break;
+
+			const int16_t result = pkt.read<int16_t>();
+			if (result == 0)
+			{
+				if (pkt.size() == pkt.rpos())
+					m_pUITradeInventory->ReceiveItemCancel(false, -1);
+				break;
+			}
+
+			if (result != 1 || pkt.size() - pkt.rpos() != sizeof(uint8_t))
+				break;
+
+			const uint8_t shopSlot = pkt.read<uint8_t>();
+			if (shopSlot < MAX_MERCH_ITEMS)
+				m_pUITradeInventory->ReceiveItemCancel(true, static_cast<int>(shopSlot));
+		}
+		break;
+
+		case MERCHANT_ITEM_LIST:
+		{
+			constexpr size_t ItemRecordSize = sizeof(uint32_t) * 3 + sizeof(int16_t) * 2;
+			constexpr size_t ExpectedSize = sizeof(int16_t) * 2 + MAX_MERCH_ITEMS * ItemRecordSize;
+			if (pkt.size() - pkt.rpos() != ExpectedSize)
+				break;
+
+			const int16_t result = pkt.read<int16_t>();
+			const int16_t ownerSocketID = pkt.read<int16_t>();
+			MerchantTrace("[R-T] ITEM_LIST recv result=%d uid=%d", (int)result, (int)ownerSocketID);
+			const bool isPendingResponse = ownerSocketID == m_iPendingMerchantListUID;
+			const bool isOpenWindowRefresh = m_pUITradeBuyInventory != nullptr
+				&& m_pUITradeBuyInventory->IsVisible()
+				&& m_pUITradeBuyInventory->m_iMerchantUID == ownerSocketID;
+			if (!isPendingResponse && !isOpenWindowRefresh)
+				break;
+			if (isPendingResponse)
+				m_iPendingMerchantListUID = -1;
+			if (ownerSocketID < 0 || (result != 1 && result != 0))
+				break;
+			if (result == 0)
+			{
+				if (isOpenWindowRefresh)
+					ForgetMerchantOwner(ownerSocketID);
+				else if (isPendingResponse && IsMerchantOwnerActive(ownerSocketID))
+					MsgOutput("This merchant is being viewed or is unavailable.", 0xffff3b3b);
+				break;
+			}
+			if (s_pPlayer == nullptr || (!isOpenWindowRefresh && s_pPlayer->m_iIDTarget != ownerSocketID)
+				|| m_MerchantOwners.find(ownerSocketID) == m_MerchantOwners.end()
+				|| s_pOPMgr == nullptr || s_pOPMgr->UPCGetByID(ownerSocketID, false) == nullptr
+				|| m_pUITradeBuyInventory == nullptr)
+				break;
+
+			int  itemIDs[MAX_ITEM_PER_TRADE]    = {};
+			int  counts[MAX_ITEM_PER_TRADE]     = {};
+			int  durations[MAX_ITEM_PER_TRADE]  = {};
+			int  prices[MAX_ITEM_PER_TRADE]     = {};
+
+			for (int i = 0; i < MAX_MERCH_ITEMS; i++)
+			{
+				const uint32_t itemID = pkt.read<uint32_t>();
+				const int16_t count = pkt.read<int16_t>();
+				const int16_t duration = pkt.read<int16_t>();
+				const uint32_t price = pkt.read<uint32_t>();
+				const uint32_t padding = pkt.read<uint32_t>();
+				if (itemID > static_cast<uint32_t>(std::numeric_limits<int>::max()) || count < 0
+					|| duration < 0 || padding != 0
+					|| price > static_cast<uint32_t>(std::numeric_limits<int>::max())
+					|| (itemID == 0 && (count != 0 || duration != 0 || price != 0))
+					|| (itemID != 0 && (count == 0 || price == 0)))
+					return;
+
+				itemIDs[i] = static_cast<int>(itemID);
+				counts[i] = static_cast<int>(count);
+				durations[i] = static_cast<int>(duration);
+				prices[i] = static_cast<int>(price);
+			}
+
+			if (!isOpenWindowRefresh)
+			{
+				MerchantTrace("[R-T] opening buyer wnd uid=%d", (int)ownerSocketID);
+				m_pUITradeBuyInventory->Open(static_cast<int>(ownerSocketID));
+			}
+			m_pUITradeBuyInventory->ReceiveItemList(itemIDs, counts, durations, prices);
+		}
+		break;
+
+		case MERCHANT_ITEM_BUY:
+		{
+			constexpr size_t ResponseSize = sizeof(int16_t) + sizeof(uint32_t) + sizeof(int16_t)
+				+ sizeof(uint8_t) * 2;
+			if (pkt.size() - pkt.rpos() != ResponseSize || m_pUITradeBuyInventory == nullptr
+				|| !m_pUITradeBuyInventory->IsVisible())
+				break;
+
+			const int16_t result = pkt.read<int16_t>();
+			const uint32_t itemID = pkt.read<uint32_t>();
+			const int16_t remainingCount = pkt.read<int16_t>();
+			const uint8_t shopSlot = pkt.read<uint8_t>();
+			const uint8_t destSlot = pkt.read<uint8_t>();
+			if (result != 1 || itemID == 0
+				|| itemID > static_cast<uint32_t>(std::numeric_limits<int>::max())
+				|| remainingCount < 0 || shopSlot >= MAX_MERCH_ITEMS || destSlot >= HAVE_MAX)
+				break;
+
+			m_pUITradeBuyInventory->ReceiveItemPurchaseUpdate(static_cast<int>(itemID),
+				static_cast<int>(remainingCount), static_cast<int>(shopSlot));
+		}
+		break;
+
+		case MERCHANT_INSERT:
+		{
+			const size_t remaining = pkt.size() - pkt.rpos();
+			if (remaining < sizeof(int16_t) * 2)
+				break;
+
+			const int16_t result = pkt.read<int16_t>();
+			const int16_t messageLength = pkt.read<int16_t>();
+			if (result != 1 || messageLength < 0 || messageLength > MAX_MERCH_MESSAGE)
+				break;
+
+			constexpr size_t FixedSize = sizeof(int16_t) * 3 + sizeof(uint32_t) * MAX_MERCH_ITEMS * 2;
+			const size_t expectedSize = FixedSize + static_cast<size_t>(messageLength);
+			if (remaining != expectedSize)
+				break;
+
+			MerchantOwnerState state;
+			if (messageLength > 0 && !pkt.readString(state.message, static_cast<size_t>(messageLength)))
+				break;
+
+			const int16_t ownerSocketID = pkt.read<int16_t>();
+			if (ownerSocketID < 0)
+				break;
+
+			for (int i = 0; i < MAX_MERCH_ITEMS; i++)
+			{
+				state.previewItemIDs[i] = pkt.read<uint32_t>();
+				if (state.previewItemIDs[i] > static_cast<uint32_t>(std::numeric_limits<int>::max()))
+					return;
+			}
+			for (int i = 0; i < MAX_MERCH_ITEMS; i++)
+			{
+				state.previewPrices[i] = pkt.read<uint32_t>();
+				if (state.previewPrices[i] > static_cast<uint32_t>(std::numeric_limits<int>::max()))
+					return;
+			}
+
+			const bool isNewAnnouncement = m_MerchantOwners.find(ownerSocketID) == m_MerchantOwners.end();
+			m_MerchantOwners[ownerSocketID] = state;
+			RefreshMerchantOwnerVisual(ownerSocketID);
+			if (isNewAnnouncement && s_pPlayer != nullptr && s_pPlayer->IDNumber() == ownerSocketID)
+			{
+		s_pPlayer->ActionMove(PSM_STOP);
+				CommandMove(MD_STOP, true);
+			}
+
+			if (isNewAnnouncement && !state.message.empty())
+			{
+				__Vector3 position;
+				bool hasPosition = false;
+				if (s_pPlayer != nullptr && s_pPlayer->IDNumber() == ownerSocketID)
+				{
+					position = s_pPlayer->Position();
+					hasPosition = true;
+				}
+				else if (s_pOPMgr != nullptr)
+				{
+					CPlayerOther* pOwner = s_pOPMgr->UPCGetByID(ownerSocketID, false);
+					if (pOwner != nullptr)
+					{
+						position = pOwner->Position();
+						hasPosition = true;
+					}
+				}
+
+				std::string szChat = state.message;
+				if (hasPosition)
+				{
+					szChat += ' ';
+					szChat += fmt::format_text_resource(IDS_LOCATION,
+						static_cast<int>(position.x), static_cast<int>(position.z));
+				}
+
+				if (m_pUIChatDlg != nullptr)
+					m_pUIChatDlg->AddChatMsg(N3_CHAT_NORMAL, szChat, D3DCOLOR_ARGB(255, 171, 168, 189));
+			}
+		}
+		break;
+
+		case MERCHANT_TRADE_CANCEL:
+		{
+			if (pkt.size() - pkt.rpos() != sizeof(int16_t) || pkt.read<int16_t>() != 1)
+				break;
+
+			// This response has no owner ID. The request closes the local window
+			// immediately; only MERCHANT_CLOSE can safely close a specific listing.
+		}
+		break;
+
+		case MERCHANT_ITEM_PURCHASED:
+		{
+			if (pkt.size() - pkt.rpos() < sizeof(uint32_t) + sizeof(uint8_t) + sizeof(int16_t) * 3)
+				break;
+
+			const uint32_t itemid = pkt.read<uint32_t>();
+			const uint8_t shopSlot = pkt.read<uint8_t>();
+			const int16_t remaining = pkt.read<int16_t>();
+			const int16_t duration = pkt.read<int16_t>();
+			const int16_t nameLength = pkt.read<int16_t>();
+			if (nameLength < 0 || nameLength > MAX_ID_SIZE
+				|| pkt.size() - pkt.rpos() != static_cast<size_t>(nameLength))
+				break;
+
+			std::string szBuyer;
+			if (nameLength > 0 && !pkt.readString(szBuyer, static_cast<size_t>(nameLength)))
+				break;
+
+			if (m_pUITradeInventory != nullptr && shopSlot < MAX_MERCH_ITEMS && remaining >= 0)
+				m_pUITradeInventory->ReceiveItemPurchased(static_cast<int>(itemid),
+					static_cast<int>(shopSlot), static_cast<int>(remaining), static_cast<int>(duration));
+
+			std::string szMsg = "Item sold to " + szBuyer + ".";
+			MsgOutput(szMsg, 0xffffff00);
+		}
+		break;
+
+		default:
+			break;
 	}
 }

@@ -17,6 +17,7 @@
 
 #include <list>
 #include <span>
+#include <string>
 
 namespace Ebenezer
 {
@@ -25,6 +26,13 @@ using ItemList                         = std::list<_EXCHANGE_ITEM*>;
 using UserEventList                    = std::list<int>; // 이밴트를 위하여 ^^;
 
 inline constexpr int BANISH_DELAY_TIME = 30;
+
+enum MerchantState
+{
+	MERCHANT_STATE_NONE    = -1,
+	MERCHANT_STATE_SELLING = 0,
+	MERCHANT_STATE_BUYING  = 1
+};
 
 class EbenezerApp;
 class CUser : public TcpServerSocket
@@ -213,6 +221,15 @@ public:
 	// Selected exchange slot for last exchange (1~5).
 	// Applicable only to exchange type 101.
 	uint8_t m_byLastExchangeNum              = 0;
+
+	// Personal merchant (player shop)
+	int8_t m_bMerchantState                  = MERCHANT_STATE_NONE;
+	int16_t m_sMerchantsSocketID             = -1; // socket id of the merchant we're browsing
+	std::list<int16_t> m_arMerchantLookers;        // socket ids of users browsing our shop
+	_MERCH_DATA m_arMerchantItems[MAX_MERCH_ITEMS] = {};
+	std::string m_strMerchantMessage;
+
+	inline bool isMerchanting() const { return m_bMerchantState != MERCHANT_STATE_NONE; }
 
 	// Game socket specific:
 	_REGION_BUFFER* _regionBuffer            = nullptr;
@@ -535,6 +552,27 @@ public:
 	void ExchangeAgree(char* pBuf);
 	void ExchangeReq(char* pBuf);
 	void ExchangeProcess(char* pBuf);
+
+	// Personal merchant (player shop)
+	void MerchantProcess(char* pBuf, int len);
+	void MerchantOpen();
+	void MerchantClose();
+	void MerchantItemAdd(char* pBuf);
+	void MerchantItemCancel(char* pBuf);
+	void MerchantItemList(char* pBuf);
+	void MerchantItemBuy(char* pBuf);
+	void MerchantInsert(char* pBuf);
+	void BroadcastMerchantAnnouncement();
+	void SendMerchantAnnouncementTo(CUser* pReceiver);
+	void SendMerchantAnnouncementsForRegion();
+	void BroadcastMerchantItemList();
+	void PruneMerchantLookersOutsideRegion();
+	void CancelMerchant();
+	void GiveMerchantItems();
+	bool MerchantReturnItem(_MERCH_DATA& merch);
+	void RemoveFromMerchantLookers();
+	void SendMerchantStackChange(uint32_t itemid, uint16_t count, int16_t duration, uint8_t slot, bool isNew);
+
 	void PartyDelete();
 	void PartyRemove(int memberid);
 	void PartyInsert();

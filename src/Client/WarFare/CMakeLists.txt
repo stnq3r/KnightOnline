@@ -139,6 +139,12 @@ set(WARFARE_SCENE_INGAME_UI_SOURCES
   UITradeExplanation.h
   UITradeSellBBS.cpp
   UITradeSellBBS.h
+  UITradeInventory.cpp
+  UITradeInventory.h
+  UITradeBuyInventory.cpp
+  UITradeBuyInventory.h
+  UITradePriceDlg.cpp
+  UITradePriceDlg.h
   UITransactionDlg.cpp
   UITransactionDlg.h
   UIUpgradeSelect.cpp

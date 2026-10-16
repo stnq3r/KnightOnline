@@ -1307,6 +1307,8 @@ enum e_Behavior : int8_t
 	BEHAVIOR_CLAN_JOIN,
 	BEHAVIOR_PARTY_BBS_REGISTER,        // Register on party bulletin board (i.e. seeking party board)
 	BEHAVIOR_PARTY_BBS_REGISTER_CANCEL, // Unregister from party bulletin board (i.e. seeking party board)
+	BEHAVIOR_MERCHANT_MOVE,              // Confirm closing a merchant before moving.
+	BEHAVIOR_MERCHANT_PURCHASE,          // Confirm a player-merchant purchase.
 
 	BEHAVIOR_EXECUTE_OPTION,            // Exit game and open options.
 
