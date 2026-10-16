@@ -76,3 +76,11 @@ Rollback: `UPDATE ITEM SET SellingGroup = 250 WHERE Num IN
 - Client runs on Mac via Wine (`run-mac-wine-dxvk.sh`), server on 15001/15100.
 - No secrets are committed here (SA password is a placeholder; `knight/knight` is the
   OpenKO-documented default DB user).
+
+## Not backed up here (intentionally)
+
+- The ~613 MB V1279 retail client (`.../T/opencode/v1279b`) — third-party retail game
+  assets; too large and not our IP. Only its helper scripts/notes were kept
+  (`archive-scripts/`). Its temp-dir copy may be cleaned by macOS.
+- A full `KN_online` DB dump — the schema + setup data is reproducible from
+  `stnq3r/OpenKO-db` (`ManualSetup/*.sql`).
